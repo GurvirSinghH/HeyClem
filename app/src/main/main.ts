@@ -1,9 +1,12 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, Menu, nativeImage, screen, session, Tray } from "electron";
+import { app, BrowserWindow, globalShortcut, ipcMain, Menu, nativeImage, screen, session, shell, Tray } from "electron";
+import fs from "node:fs";
 import path from "node:path";
 import { IPC, type PillState } from "../shared/ipc";
 import { Brain } from "./brain";
 import { ConfigError, loadConfig, type ClemConfig } from "./config";
-import { log, warn } from "./log";
+import { LocalWorker } from "./localWorker";
+import { log, logToFile, rotateLog, warn } from "./log";
+import { Speaker } from "./speech";
 import { TurnController, type PillUi } from "./turn";
 import { WorkerClient } from "./worker";
 import { WorkersAiBrain } from "./workersAiBrain";
@@ -11,9 +14,12 @@ import { WorkersAiBrain } from "./workersAiBrain";
 // The pill plays speech without ever being clicked.
 app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
 
-if (!app.requestSingleInstanceLock()) {
-  app.quit();
-}
+const isFirstInstance = app.requestSingleInstanceLock();
+if (!isFirstInstance) app.quit();
+
+// In the background nobody sees a crash dialog, so problems go to the log instead.
+process.on("uncaughtException", (err) => warn("app", "uncaught exception:", err));
+process.on("unhandledRejection", (err) => warn("app", "unhandled rejection:", err));
 
 const PILL_WIDTH = 560;
 const PILL_HEIGHT = 260;
@@ -22,6 +28,35 @@ const FALLBACK_SHORTCUT = "Control+Alt+Space";
 let pill: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let stopHotkey: (() => void) | null = null;
+let localWorker: LocalWorker | null = null;
+
+function settingsFile(): string {
+  return path.join(app.getPath("userData"), "settings.json");
+}
+
+/** On unless the user has turned it off in the tray menu. */
+function readStartAtLogin(): boolean {
+  try {
+    return (JSON.parse(fs.readFileSync(settingsFile(), "utf8")) as { startAtLogin?: boolean }).startAtLogin !== false;
+  } catch {
+    return true;
+  }
+}
+
+function setStartAtLogin(enabled: boolean): void {
+  app.setLoginItemSettings({
+    openAtLogin: enabled,
+    path: process.execPath,
+    // Electron quotes this itself in the startup command; adding quotes here breaks the command.
+    args: [app.getAppPath()],
+    name: "HeyClem",
+  });
+  try {
+    fs.writeFileSync(settingsFile(), JSON.stringify({ startAtLogin: enabled }));
+  } catch (err) {
+    warn("app", "couldn't save settings:", (err as Error).message);
+  }
+}
 
 function createPill(): BrowserWindow {
   const area = screen.getPrimaryDisplay().workArea;
@@ -54,7 +89,12 @@ function createPill(): BrowserWindow {
   win.setAlwaysOnTop(true, "screen-saver");
   win.setIgnoreMouseEvents(true); // Stage 1: the pill only shows status; clicks pass through
   win.setContentProtection(true); // keep the pill out of screenshots, including Clem's own
-  // The pill's console (mic and playback problems) goes to the terminal log.
+  // The pill owns the mic and speaker, so if its renderer ever dies, bring it back.
+  win.webContents.on("render-process-gone", (_e, details) => {
+    warn("pill", `renderer gone: ${details.reason}`);
+    if (details.reason !== "clean-exit" && !win.isDestroyed()) void win.loadFile(path.join(__dirname, "renderer", "index.html"));
+  });
+  // The pill's console (mic and playback problems) goes to the log.
   win.webContents.on("console-message", (e) => {
     if (e.level === "debug") return;
     const line = `${e.message}${e.level === "info" ? "" : ` (${e.sourceId}:${e.lineNumber})`}`;
@@ -74,7 +114,7 @@ function pillUi(win: BrowserWindow): PillUi {
     state: (s: PillState) => send(IPC.state, s),
     micStart: () => send(IPC.micStart),
     micStop: () => send(IPC.micStop),
-    audioPlay: (turnId, seq, mp3) => send(IPC.audioPlay, { turnId, seq, bytes: new Uint8Array(mp3) }),
+    audioPlay: (turnId, seq, pcm) => send(IPC.audioPlay, { turnId, seq, bytes: new Uint8Array(pcm) }),
     audioEnd: (turnId) => send(IPC.audioEnd, turnId),
     audioFlush: () => send(IPC.audioFlush),
   };
@@ -106,6 +146,9 @@ function createTray(howToAsk: string, onTestVoice: (() => void) | null): Tray {
     Menu.buildFromTemplate([
       { label: howToAsk, enabled: false },
       { label: "Test the voice", enabled: onTestVoice !== null, click: () => onTestVoice?.() },
+      { type: "separator" },
+      { label: "Start with Windows", type: "checkbox", checked: readStartAtLogin(), click: (item) => setStartAtLogin(item.checked) },
+      { label: "Open logs", click: () => void shell.openPath(app.getPath("logs")) },
       { type: "separator" },
       { label: "Quit HeyClem", click: () => app.quit() },
     ]),
@@ -145,6 +188,9 @@ async function startHotkey(turns: TurnController): Promise<string> {
 
 async function main(): Promise<void> {
   await app.whenReady();
+  logToFile(path.join(app.getPath("logs"), "heyclem.log"));
+  log("app", `starting, version ${app.getVersion()}`);
+  setStartAtLogin(readStartAtLogin()); // also keeps the startup command right if the folder moves
 
   // The pill window is the only web content, and it only needs the microphone.
   session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => callback(permission === "media"));
@@ -180,19 +226,37 @@ async function main(): Promise<void> {
   const howToAsk = await startHotkey(turns);
   let testTurn = -1;
   tray = createTray(howToAsk, () => {
-    void worker
-      .speak("Hi, I'm Clem. Hold Control and Alt, ask about your screen, then let go.", new AbortController().signal)
-      .then((mp3) => {
-        ui.audioFlush();
-        ui.audioPlay(testTurn, 0, mp3);
-        ui.audioEnd(testTurn--);
-      })
-      .catch((err: Error) => ui.state({ phase: "error", message: err.message }));
+    const turnId = testTurn--;
+    ui.audioFlush();
+    const speaker = new Speaker(worker, (seq, pcm) => ui.audioPlay(turnId, seq, pcm));
+    speaker.say("Hi, I'm Clem. Hold Control and Alt, ask about your screen, then let go.");
+    void speaker.finished().then(() => {
+      ui.audioEnd(turnId);
+      if (speaker.failedCount > 0) ui.state({ phase: "error", message: "Text-to-speech failed. Check that the worker is running." });
+    });
   });
 
   const effort = cfg.brain === "anthropic" ? ` (effort ${cfg.effort})` : "";
   log("app", `worker ${cfg.workerUrl} | model ${cfg.model}${effort} | stt ${cfg.sttLanguage}`);
   try {
+    if (/^https?:\/\/(127\.0\.0\.1|localhost)([:/]|$)/.test(cfg.workerUrl)) {
+      const workerLog = path.join(app.getPath("logs"), "worker.log");
+      rotateLog(workerLog);
+      localWorker = new LocalWorker({
+        workerDir: path.resolve(app.getAppPath(), "..", "worker"),
+        url: cfg.workerUrl,
+        logFile: workerLog,
+        log: (message) => log("worker", message),
+      });
+      if (await localWorker.isHealthy()) log("worker", "already running (started elsewhere), using it");
+      else localWorker.start();
+      // Generous: right after sign-in the PC is busy starting everything else too.
+      if (!(await localWorker.waitUntilHealthy(120_000))) {
+        ui.state({ phase: "error", message: `The local worker didn't start. Check that Node.js is installed, and see the logs in ${app.getPath("logs")}.` });
+        return;
+      }
+    }
+
     const health = await worker.health();
     if (!health.ok) {
       ui.state({ phase: "error", message: `The worker is missing secrets: ${health.missing.join(", ")}. Fill in worker/.dev.vars.` });
@@ -213,11 +277,14 @@ async function main(): Promise<void> {
 app.on("window-all-closed", () => app.quit());
 app.on("will-quit", () => {
   stopHotkey?.();
+  localWorker?.stop();
   globalShortcut.unregisterAll();
   tray?.destroy();
 });
 
-main().catch((err) => {
-  warn("app", "startup failed:", err);
-  app.quit();
-});
+if (isFirstInstance) {
+  main().catch((err) => {
+    warn("app", "startup failed:", err);
+    app.quit();
+  });
+}

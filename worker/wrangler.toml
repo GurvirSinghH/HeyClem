@@ -10,4 +10,7 @@ compatibility_date = "2026-08-01"
 [vars]
 ALLOWED_MODELS = "claude-opus-5-5,claude-sonnet-5-5,claude-haiku-5-5"
 WORKERS_AI_MODELS = "@cf/meta/llama-4-scout-17b-16e-instruct,@cf/mistralai/mistral-small-3.1-24b-instruct"
+# Deepgram's India host is far faster from India. It never falls back to another region, so if it's
+# down, requests fail; api.deepgram.com is the global alternative.
+DEEPGRAM_HOST = "api.in.deepgram.com"
 TTS_MODEL = "aura-2-thalia-en"

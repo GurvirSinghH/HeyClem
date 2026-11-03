@@ -13,7 +13,7 @@ export interface PillUi {
   state(s: PillState): void;
   micStart(): void;
   micStop(): void;
-  audioPlay(turnId: number, seq: number, mp3: Buffer): void;
+  audioPlay(turnId: number, seq: number, pcm: Buffer): void;
   audioEnd(turnId: number): void;
   audioFlush(): void;
 }
@@ -142,6 +142,7 @@ export class TurnController {
 
       if (!question) {
         turn.phase = "done";
+        log("turn", `#${turn.id} heard nothing | held ${Math.round(turn.releasedAt - turn.pressedAt)} ms | transcript wait ${ms(tStt)}`);
         this.ui.state({ phase: "idle", message: "I didn't catch that. Hold Ctrl+Alt while you talk." });
         return;
       }
@@ -152,14 +153,14 @@ export class TurnController {
 
       let tFirstText = 0;
       let tFirstAudio = 0;
-      const speaker = new Speaker(this.worker, (seq, mp3) => {
+      const speaker = new Speaker(this.worker, (seq, pcm) => {
         if (this.turn !== turn) return;
         if (!tFirstAudio) {
           tFirstAudio = performance.now();
           turn.phase = "speaking";
+          this.ui.state({ phase: "speaking", transcript: question, answer: turn.answer });
         }
-        this.ui.audioPlay(turn.id, seq, mp3);
-        this.ui.state({ phase: "speaking", transcript: question, answer: turn.answer });
+        this.ui.audioPlay(turn.id, seq, pcm);
       });
       turn.speaker = speaker;
 
@@ -187,9 +188,9 @@ export class TurnController {
 
       log(
         "turn",
-        `#${turn.id} done | transcript ${ms(tStt)} | first word ${tFirstText ? ms(tFirstText) : "-"} | first audio ${
+        `#${turn.id} done | held ${Math.round(turn.releasedAt - turn.pressedAt)} ms | transcript ${ms(tStt)} | first word ${tFirstText ? ms(tFirstText) : "-"} | first audio ${
           tFirstAudio ? ms(tFirstAudio) : "-"
-        } (from key release) | screenshot ${shot ? `${shot.ms} ms` : "failed"}`,
+        } (from key release) | screenshot ${shot ? `${shot.ms} ms, ${Math.round((shot.jpegBase64.length * 0.75) / 1024)} KB` : "failed"}`,
       );
 
       if (speaker.sentCount > 0 && speaker.failedCount === speaker.sentCount) {
@@ -223,7 +224,7 @@ function friendly(err: unknown, cfg: ClemConfig): string {
   }
   if (err instanceof Anthropic.RateLimitError) return "Claude is rate-limiting requests. Try again in a moment.";
   if (err instanceof Anthropic.APIConnectionError) {
-    return `Can't reach the worker at ${cfg.workerUrl}. Start it with "npm run dev" in worker/.`;
+    return `Can't reach the worker at ${cfg.workerUrl}. See worker.log (tray menu, Open logs).`;
   }
   if (err instanceof Anthropic.APIError) return `Claude error ${err.status ?? ""}: ${err.message}`.trim();
   return err instanceof Error ? err.message : String(err);

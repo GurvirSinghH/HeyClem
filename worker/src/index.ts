@@ -1,7 +1,7 @@
 // HeyClem Worker: the only place API keys live.
 //
 //   GET  /v1/listen               -> WebSocket relay to Deepgram live transcription
-//   POST /v1/speak                -> Deepgram Aura text-to-speech (mp3 stream)
+//   POST /v1/speak                -> Deepgram Aura text-to-speech (streamed raw 16-bit PCM, 24 kHz)
 //   POST /anthropic/v1/messages   -> Claude Messages API proxy (the app's Anthropic SDK
 //                                    points its baseURL here and sends the app token as its key)
 //   POST /v1/brain/workers-ai     -> Cloudflare Workers AI chat proxy (OpenAI-compatible, streamed)
@@ -25,11 +25,14 @@ type Env = {
   WORKERS_AI_MODELS?: string;
   /** Deepgram Aura voice, e.g. aura-2-thalia-en */
   TTS_MODEL?: string;
+  /** Deepgram API host. Regional hosts are much faster nearby, e.g. api.in.deepgram.com. */
+  DEEPGRAM_HOST?: string;
 };
 
 const DEFAULT_ALLOWED_MODELS = "claude-opus-5-5,claude-sonnet-5-5,claude-haiku-5-5";
 const DEFAULT_WORKERS_AI_MODELS = "@cf/meta/llama-4-scout-17b-16e-instruct,@cf/mistralai/mistral-small-3.1-24b-instruct";
 const DEFAULT_TTS_MODEL = "aura-2-thalia-en";
+const DEFAULT_DEEPGRAM_HOST = "api.deepgram.com";
 const MAX_TOKENS_CAP = 8192;
 const MAX_TTS_CHARS = 1200;
 
@@ -92,7 +95,7 @@ app.get("/v1/listen", async (c) => {
     return c.json({ error: "bad_request", message: "Expected a WebSocket upgrade." }, 426);
   }
 
-  const url = new URL("https://api.deepgram.com/v1/listen");
+  const url = new URL(`https://${c.env.DEEPGRAM_HOST || DEFAULT_DEEPGRAM_HOST}/v1/listen`);
   for (const name of STT_PARAMS) {
     const value = c.req.query(name);
     if (value) url.searchParams.set(name, value);
@@ -155,7 +158,8 @@ app.post("/v1/speak", async (c) => {
   if (text.length > MAX_TTS_CHARS) text = text.slice(0, MAX_TTS_CHARS);
 
   const model = c.env.TTS_MODEL || DEFAULT_TTS_MODEL;
-  const res = await fetchWithRetry(`https://api.deepgram.com/v1/speak?model=${encodeURIComponent(model)}&encoding=mp3`, {
+  const host = c.env.DEEPGRAM_HOST || DEFAULT_DEEPGRAM_HOST;
+  const res = await fetchWithRetry(`https://${host}/v1/speak?model=${encodeURIComponent(model)}&encoding=linear16&container=none&sample_rate=24000`, {
     method: "POST",
     headers: {
       Authorization: `Token ${c.env.DEEPGRAM_API_KEY}`,
@@ -167,7 +171,7 @@ app.post("/v1/speak", async (c) => {
     return c.json({ error: "deepgram_speak_failed", status: res.status, detail: await res.text() }, 502);
   }
   return new Response(res.body, {
-    headers: { "Content-Type": res.headers.get("content-type") ?? "audio/mpeg", "Cache-Control": "no-store" },
+    headers: { "Content-Type": res.headers.get("content-type") ?? "audio/l16;rate=24000", "Cache-Control": "no-store" },
   });
 });
 

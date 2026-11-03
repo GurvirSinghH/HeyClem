@@ -25,14 +25,27 @@ const LABELS: Record<PillState["phase"], string> = {
 };
 const LINGER_MS = { idle: 8000, error: 12000 };
 let hideTimer: number | undefined;
+let lastPhase = "";
+let micLive = false;
+
+/** While the mic is still opening, nothing is being recorded, so the pill says so. */
+function showMicStatus(phase: PillState["phase"]): void {
+  if (phase !== "listening") {
+    label.textContent = LABELS[phase];
+    note.textContent = "";
+  } else {
+    label.textContent = micLive ? LABELS.listening : "Mic starting";
+    note.textContent = micLive ? "release to send" : "wait a moment";
+  }
+}
 
 console.info("ready");
 
 clem.onState((s) => {
-  console.info(`state ${s.phase}${s.message ? `: ${s.message}` : ""}`);
+  if (s.phase !== lastPhase || s.message) console.info(`state ${s.phase}${s.message ? `: ${s.message}` : ""}`);
+  lastPhase = s.phase;
   pill.dataset.phase = s.phase;
-  label.textContent = LABELS[s.phase];
-  note.textContent = s.phase === "listening" ? "release to send" : "";
+  showMicStatus(s.phase);
   you.textContent = s.transcript ? `You: ${s.transcript}` : s.phase === "listening" ? "…" : "";
   answer.textContent = s.answer ?? s.message ?? "";
 
@@ -70,6 +83,8 @@ function scheduleRelease(): void {
 }
 
 async function startRecording(): Promise<void> {
+  const t0 = performance.now();
+  const wasOpen = Boolean(stream?.getAudioTracks().some((t) => t.readyState === "live"));
   const s = await ensureStream();
   if (!wantRecording) {
     clem.micEnded();
@@ -89,6 +104,9 @@ async function startRecording(): Promise<void> {
   };
   rec.start(100); // a chunk every 100 ms keeps transcription live
   recorder = rec;
+  micLive = true;
+  showMicStatus("listening");
+  console.info(`mic live ${Math.round(performance.now() - t0)} ms after the keys (${wasOpen ? "already open" : "had to open"})`);
 }
 
 clem.onMicStart(() => {
@@ -104,6 +122,7 @@ clem.onMicStart(() => {
 
 clem.onMicStop(() => {
   wantRecording = false;
+  micLive = false;
   const stop = () => {
     if (recorder && recorder.state !== "inactive") recorder.stop();
     recorder = null;
@@ -115,66 +134,66 @@ clem.onMicStop(() => {
 
 // ---------- speaker ----------
 
-const audio = new AudioContext();
-let queue: AudioClip[] = [];
-let current: AudioBufferSourceNode | null = null;
-let busy = false;
-let generation = 0; // bumped on flush so in-flight decodes are dropped
+// Speech arrives as raw 16-bit, 24 kHz PCM, chunk by chunk. Each chunk is scheduled right after the last.
+const SAMPLE_RATE = 24_000;
+const START_LEAD_S = 0.05;
+const audio = new AudioContext({ latencyHint: "interactive" });
+const playing = new Set<AudioBufferSourceNode>();
+let nextStart = 0;
 let playingTurn = 0;
 let endedTurn: number | null = null;
 
 function maybeDrained(): void {
-  if (!busy && queue.length === 0 && endedTurn === playingTurn) {
+  if (playing.size === 0 && endedTurn === playingTurn) {
     endedTurn = null;
     clem.audioDrained(playingTurn);
   }
 }
 
-async function pump(): Promise<void> {
-  if (busy) return;
-  const clip = queue.shift();
-  if (!clip) return maybeDrained();
-  busy = true;
-  const gen = generation;
-  try {
-    if (audio.state === "suspended") await audio.resume();
-    const bytes = clip.bytes;
-    const decoded = await audio.decodeAudioData(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer);
-    if (gen !== generation) return;
-    const src = audio.createBufferSource();
-    src.buffer = decoded;
-    src.connect(audio.destination);
-    src.onended = () => {
-      if (current === src) current = null;
-      if (gen !== generation) return;
-      busy = false;
-      void pump();
-    };
-    current = src;
-    src.start();
-    return;
-  } catch (err) {
-    console.error("audio clip failed", err);
+function stopAll(): void {
+  for (const src of playing) {
+    src.onended = null;
+    try {
+      src.stop();
+    } catch {
+      /* already stopped */
+    }
   }
-  if (gen === generation) {
-    busy = false;
-    void pump();
-  }
+  playing.clear();
+  nextStart = 0;
 }
 
-clem.onAudioPlay((clip) => {
+clem.onAudioPlay((clip: AudioClip) => {
   if (clip.turnId !== playingTurn) {
+    stopAll();
     playingTurn = clip.turnId;
-    queue = [];
   }
-  queue.push(clip);
-  void pump();
+  const samples = Math.floor(clip.bytes.byteLength / 2);
+  if (samples === 0) return;
+  if (audio.state === "suspended") void audio.resume();
+
+  const view = new DataView(clip.bytes.buffer, clip.bytes.byteOffset, samples * 2);
+  const buffer = audio.createBuffer(1, samples, SAMPLE_RATE);
+  const channel = buffer.getChannelData(0);
+  for (let i = 0; i < samples; i++) channel[i] = view.getInt16(i * 2, true) / 32768;
+
+  const src = audio.createBufferSource();
+  src.buffer = buffer;
+  src.connect(audio.destination);
+  src.onended = () => {
+    playing.delete(src);
+    maybeDrained();
+  };
+  const at = Math.max(nextStart, audio.currentTime + START_LEAD_S);
+  src.start(at);
+  nextStart = at + buffer.duration;
+  playing.add(src);
 });
 
 clem.onAudioEnd((turnId) => {
   if (turnId !== playingTurn) {
     // Nothing was played for this turn (empty answer): report drained straight away.
-    if (queue.length === 0 && !busy) clem.audioDrained(turnId);
+    clem.audioDrained(turnId);
     return;
   }
   endedTurn = turnId;
@@ -182,14 +201,6 @@ clem.onAudioEnd((turnId) => {
 });
 
 clem.onAudioFlush(() => {
-  generation++;
-  queue = [];
+  stopAll();
   endedTurn = null;
-  busy = false;
-  try {
-    current?.stop();
-  } catch {
-    /* already stopped */
-  }
-  current = null;
 });

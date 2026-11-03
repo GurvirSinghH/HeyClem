@@ -29,15 +29,16 @@ export class WorkerClient {
     });
   }
 
-  /** Text to mp3 bytes (Deepgram Aura via the worker). */
-  async speak(text: string, signal: AbortSignal): Promise<Buffer> {
+  /** Text to a stream of raw 16-bit, 24 kHz PCM (Deepgram Aura via the worker). */
+  async speakStream(text: string, signal: AbortSignal): Promise<ReadableStream<Uint8Array>> {
     const res = await this.fetch("/v1/speak", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text }),
       signal,
     });
-    return Buffer.from(await res.arrayBuffer());
+    if (!res.body) throw new WorkerError("The worker returned no audio.", null);
+    return res.body;
   }
 
   private async fetch(route: string, init: RequestInit, authed = true): Promise<Response> {
@@ -48,7 +49,7 @@ export class WorkerClient {
       res = await fetch(`${this.cfg.workerUrl}${route}`, { ...init, headers });
     } catch (err) {
       if ((err as Error).name === "AbortError") throw err;
-      throw new WorkerError(`Can't reach the worker at ${this.cfg.workerUrl}. Start it with "npm run dev" in worker/.`, null);
+      throw new WorkerError(`Can't reach the worker at ${this.cfg.workerUrl}. See worker.log (tray menu, Open logs).`, null);
     }
     if (!res.ok) {
       let detail = "";
