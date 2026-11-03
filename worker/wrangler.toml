@@ -1,0 +1,13 @@
+name = "heyclem-worker"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+
+# Secrets are NOT stored here.
+#   Local dev:  copy .dev.vars.example to .dev.vars and fill it in.
+#   Deployed:   npx wrangler secret put DEEPGRAM_API_KEY   (and CLEM_APP_TOKEN, plus your brain:
+#               CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID, or ANTHROPIC_API_KEY)
+
+[vars]
+ALLOWED_MODELS = "claude-opus-5-5,claude-sonnet-5-5,claude-haiku-5-5"
+WORKERS_AI_MODELS = "@cf/meta/llama-4-scout-17b-16e-instruct,@cf/mistralai/mistral-small-3.1-24b-instruct"
+TTS_MODEL = "aura-2-thalia-en"

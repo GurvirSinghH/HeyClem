@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; media-src 'self' blob:"
+    />
+    <title>HeyClem</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500&family=Geist+Mono:wght@400;500&display=swap" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <section id="pill" class="pill gone" data-phase="idle" aria-live="polite">
+      <header class="row">
+        <span class="dot" aria-hidden="true"></span>
+        <span id="label" class="label">Clem</span>
+        <span id="note" class="note"></span>
+      </header>
+      <p id="you" class="you"></p>
+      <p id="answer" class="answer"></p>
+    </section>
+    <script src="renderer.js"></script>
+  </body>
+</html>

@@ -1,0 +1,25 @@
+{
+  "name": "heyclem",
+  "productName": "HeyClem",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hold Ctrl+Alt, ask about your screen, hear the answer.",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "node build.mjs",
+    "start": "node build.mjs && electron .",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.3.0",
+    "uiohook-napi": "^1.5.5",
+    "ws": "^8.22.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/ws": "^8.18.2",
+    "electron": "^45.2.1",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
+  }
+}

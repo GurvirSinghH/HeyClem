@@ -1,0 +1,11 @@
+# Copy to .dev.vars (git-ignored) for `npm run dev`.
+DEEPGRAM_API_KEY=...
+# Any long random string; put the same value in app/.env as CLEM_APP_TOKEN.
+CLEM_APP_TOKEN=change-me-to-a-long-random-string
+
+# The brain: fill in one of these two options.
+# Option 1, Cloudflare Workers AI (free daily allowance):
+CLOUDFLARE_API_TOKEN=
+CLOUDFLARE_ACCOUNT_ID=
+# Option 2, Claude:
+ANTHROPIC_API_KEY=
